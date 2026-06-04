@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.venv-vllm/
+checkpoints/
+docker/.env
+.api_key
+self-service/
+*.pdf
+.DS_Store
+cloudflared

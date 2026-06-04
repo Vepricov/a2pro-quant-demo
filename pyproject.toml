@@ -1,0 +1,25 @@
+[project]
+name = "a2-kvant"
+version = "0.1.0"
+description = "A2.Pro quantization demo: quantize -> save -> evaluate -> serve via vLLM"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.45",
+    "datasets>=2.20",
+    "accelerate>=0.34",
+    "llmcompressor>=0.3",
+    "compressed-tensors>=0.6",
+    "numpy>=1.24",
+    "openai>=1.40",
+]
+
+[project.scripts]
+a2-kvant = "a2_kvant.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/a2_kvant"]
