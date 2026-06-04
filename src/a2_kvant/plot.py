@@ -24,8 +24,10 @@ _PANELS = [
     ("disk_size_gb", "Хранение на диске", "ГБ", True),
     ("vram_alloc_gb", "Память GPU (веса)", "ГБ", True),
     ("tokens_per_s", "Скорость генерации", "tok/s", False),
-    ("perplexity", "Качество (perplexity ↓)", "", True),
+    ("hellaswag_acc_norm", "Качество (HellaSwag)", "", False),
 ]
+
+_PARITY_THRESHOLD = 1.5  # |Δ%| ниже порога — статистический паритет, не «улучшение»
 
 _BASE_COLOR = "#94A3B8"   # FP16 — нейтральный серо-синий
 _OURS_COLOR = "#E4572E"   # квантованная — акцент
@@ -33,10 +35,12 @@ _GOOD_COLOR = "#1B9E4B"   # бейдж улучшения
 
 
 def _badge(base: float, quant: float, lower_is_better: bool) -> str:
-    """Improvement badge text, e.g. '▼ 45%' or '▲ 46%'."""
+    """Improvement badge, e.g. '▼ 42%' / '▲ 46%'; '≈ паритет' внутри шума."""
     if base in (None, 0) or quant is None:
         return ""
     delta = (quant - base) / base * 100.0
+    if abs(delta) < _PARITY_THRESHOLD:
+        return "≈ паритет"
     arrow = "▼" if delta < 0 else "▲"
     return f"{arrow} {abs(delta):.0f}%"
 
@@ -69,7 +73,7 @@ def render_comparison(compare_json: str | Path, out_png: str | Path, title: str)
         top = max(bvals) if max(bvals) > 0 else 1.0
         ax.set_ylim(0, top * 1.22)
         for bar, v in zip(bars, bvals):
-            label = f"{v:.1f}" if v >= 10 else f"{v:.2f}"
+            label = f"{v:.1f}" if v >= 10 else (f"{v:.3f}" if v < 1 else f"{v:.2f}")
             if unit:
                 label += f" {unit}"
             ax.text(bar.get_x() + bar.get_width() / 2, v + top * 0.03, label,
