@@ -1,60 +1,82 @@
-# A2.Pro — демонстрация квантизации и эффективного хранения моделей
+# Квантизация LLM: сжатие, хранение и инференс через OpenAI-эндпоинт
 
-Демо-цепочка для направления **«методы эффективного хранения больших моделей»**
-(ПМ «А2.Оптимизация», ТЗ 4 Сгибнев п. 3.2.3.7; ТЗ 3 Безносиков + Дополнение,
-мероприятие «эффективное хранение больших моделей»).
+Полный конвейер: **берём модель → квантуем веса → сохраняем сжатую →
+поднимаем в vLLM → подключаемся по OpenAI API**. Модель: Qwen3-8B,
+квантизация W8A8 (SmoothQuant + GPTQ) через
+[`llm-compressor`](https://github.com/vllm-project/llm-compressor).
 
-Сценарий: **взять модель → квантовать веса → сохранить сжатую → загрузить и
-инферить → поднять по OpenAI-совместимому эндпоинту для платформы**.
+![Qwen3-8B: FP16 vs W8A8](results/comparison.png)
 
-Модели: Qwen 2.5 / 3 (7–8B). Инструмент квантизации: `llm-compressor`
-(SmoothQuant + GPTQ + AWQ + FP8), формат `compressed-tensors` — vLLM грузит нативно.
+| | FP16 | **W8A8 (наша)** | Δ |
+|---|---|---|---|
+| Хранение на диске | 16.0 ГБ | **8.81 ГБ** | **−45%** |
+| Память GPU (веса) | 15.3 ГБ | **8.80 ГБ** | **−42%** |
+| Скорость (vLLM, H200) | 78.2 tok/s | **114.0 tok/s** | **+46%** |
+| Качество (perplexity ↓) | 8.62 | **8.53** | без потери |
 
-## Что закрывает в ТЗ
+Подробный отчёт с методикой: **[REPORT.md](REPORT.md)**.
 
-| Требование ТЗ | Где реализовано |
-| --- | --- |
-| «методы эффективного хранения больших моделей» (ТЗ4 §3.2.3.7) | `quantize.py` + recipes (`w8a8`, `w4a16`, `fp8`) |
-| «воспроизвести основные существующие подходы» (ТЗ3 §3.2/3.3) | recipe `w8a8` = SmoothQuant; `w4a16` = GPTQ (optimal-brain) |
-| режим «инференс/оценка с расчётом метрик качества» (Доп. §3.5.1.2) | `evaluate.py` (perplexity) |
-| сравнение с базой по качеству и ресурсам (Доп. §3.7.2) | `compare` → `results/results_table.md` (FP16 vs quant) |
-| хранение/повторная загрузка сжатой модели | `save_pretrained(save_compressed=True)` → vLLM `--quantization compressed-tensors` |
-| сценарий «инференс» в ПМ «А2.Сервер», клиент-сервер (ТЗ4 §3.2.3.10, §3.2.1.4) | `docker/docker-compose.yml` (vLLM OpenAI endpoint) + `serve_client.py` |
-| Docker / Docker Compose (Доп. §3.5.3.2) | `docker/docker-compose.yml` |
-| JSON вход/выход, фиксация конфигов/логов/метрик (Доп. §3.5.3.3, §3.5.7.1) | `config.py` (JSON), `results/*.json`, `seed` |
+## 🔧 Главные файлы квантизации
 
-**Оговорка для отчёта.** Эта демка закрывает ногу «воспроизведение существующих
-техник квантизации + интеграция в платформу». Ноги «новые методы на основе
-оптимизационных постановок + теория сходимости» и «QAT» — отдельные научные
-результаты раздела, демкой не закрываются.
+| Файл | Что делает |
+|---|---|
+| **[`src/a2_kvant/quantize.py`](src/a2_kvant/quantize.py)** | ядро: загрузка FP16 → калибровка → квантизация → сохранение `compressed-tensors` (vLLM грузит напрямую) |
+| **[`src/a2_kvant/recipes.py`](src/a2_kvant/recipes.py)** | реестр рецептов: `w8a8` (SmoothQuant+GPTQ INT8), `w4a16` (GPTQ INT4), `fp8` |
+| [`configs/qwen3-8b-w8a8.json`](configs/qwen3-8b-w8a8.json) | конфиг прогона: модель, рецепт, калибровочный датасет, eval |
+
+Запуск квантизации:
+
+```bash
+uv venv && uv pip install -e .
+PYTHONPATH=src python -m a2_kvant.cli quantize configs/qwen3-8b-w8a8.json
+# или полный цикл с метриками до/после:
+scripts/run_compare.sh configs/qwen3-8b-w8a8.json
+```
+
+## 🚀 Запуск наших квантованных моделей
+
+В проекте можно поднимать **наши квантованные модели** (и оригинал для
+сравнения) одной командой — обычный OpenAI-совместимый эндпоинт:
+
+```bash
+uv venv .venv-vllm && uv pip install --python .venv-vllm vllm
+
+scripts/serve_model.sh w8a8    # 🔥 наша квантованная (8.8 ГБ, +46% скорости)
+scripts/serve_model.sh fp16    # оригинальная FP16 — для сравнения
+```
+
+Подключение — как к любому OpenAI API (ключ генерируется в `.api_key`):
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://<host>:8011/v1", api_key="<KEY>")
+r = client.chat.completions.create(
+    model="qwen3-8b-w8a8",
+    messages=[{"role": "user", "content": "Привет!"}],
+    max_tokens=100,
+)
+print(r.choices[0].message.content)
+```
+
+Вариант через Docker: [`docker/docker-compose.yml`](docker/docker-compose.yml)
+(образ `vllm/vllm-openai`, чекпоинт пробрасывается volume-ом).
+
+Интеграция с платформой (self-service и любой OpenAI-совместимый клиент) —
+раздел 4 в [REPORT.md](REPORT.md).
 
 ## Структура
 
 ```
-configs/        JSON-конфиги запусков (один конфиг = один прогон)
-src/a2_kvant/   config, recipes (registry), quantize, evaluate, metrics, serve_client, cli
-docker/         docker-compose.yml + .env.example для vLLM OpenAI endpoint
-scripts/        run_compare.sh, serve.sh
-results/        run_config.json, report_*.json, results_table.md (артефакты ПМИ)
+configs/          JSON-конфиги запусков (один конфиг = один прогон)
+src/a2_kvant/     quantize ⭐, recipes ⭐, evaluate, metrics, plot, cli, serve_client
+scripts/          run_compare.sh, serve_model.sh (w8a8|fp16), bench_endpoint.py
+docker/           docker-compose для vLLM OpenAI-эндпоинта
+results/          таблицы, JSON-отчёты, comparison.png
 ```
 
-## Запуск (на сервере с GPU, напр. brain_lab)
+## Замечание по измерениям
 
-```bash
-uv venv && uv pip install -e .
-
-# 1) FP16 baseline -> квантизация -> метрики quant -> сравнительная таблица
-scripts/run_compare.sh configs/qwen2.5-7b-w8a8.json
-
-# 2) поднять квантованную модель по OpenAI-эндпоинту и проверить
-cp docker/.env.example docker/.env   # поправить MODEL/порт
-scripts/serve.sh
-```
-
-Платформа A2.Pro подключается к `http://<host>:8011/v1` (OpenAI-совместимый).
-
-## Статус
-
-Каркас. Локально проверены синтаксис и парсинг конфигов. Прогон на GPU
-(квантизация + метрики + поднятие vLLM) — следующий шаг на brain_lab.
-См. `PLAN.md`.
+Скорость и память квантованной модели нужно мерить **под vLLM**: у HF
+transformers нет быстрых INT8-ядер, он распаковывает веса обратно в FP16 и
+искажает обе метрики. Perplexity от движка не зависит. Детали — в
+[REPORT.md](REPORT.md).
